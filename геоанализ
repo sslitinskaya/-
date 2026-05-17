@@ -1,1 +1,186 @@
+*скачиваем файлы для более удобной работы с результатами
+Сколько кофейн в городе Москва, и какова плосность их распределения по городу
+#Установка библиотек
+!pip install osmnx folium pandas
+
+import osmnx as ox
+import folium
+import pandas as pd
+from folium.plugins import HeatMap
+from IPython.display import display
+
+#Скачиваем карту Москвы
+moscow = ox.geocode_to_gdf("Москва, Россия")
+
+#Ищем всё с тегом amenity=cafe
+cafes = ox.features_from_polygon(
+    moscow.geometry.iloc[0],
+    tags={'amenity': 'cafe'})
+
+cafes = cafes[cafes.geometry.notna()]
+cafes['lon'] = cafes.geometry.centroid.x
+cafes['lat'] = cafes.geometry.centroid.y
+
+df = pd.DataFrame({
+    'name': cafes['name'].fillna('Без названия'),
+    'lat': cafes['lat'],
+    'lon': cafes['lon']
+}).dropna()
+
+print(f"Количество кофеен: {len(df)}")
+
+if len(df) > 0:
+    #Карта всех кофейн
+    moscow_center = [55.7558, 37.6176]
+    marker_map = folium.Map(location=moscow_center, zoom_start=11)
+    for _, row in df.iterrows():
+        folium.Marker(
+            location=[row['lat'], row['lon']],
+            popup=row['name'],
+            icon=folium.Icon(color='red', icon='coffee', prefix='fa')).add_to(marker_map)
+    print("Все кофейни")
+    display(marker_map)
+
+    #Тепловая карта плотности кофейн
+    heat_map = folium.Map(location=moscow_center, zoom_start=11)
+    heat_data = [[row['lat'], row['lon']] for _, row in df.iterrows()]
+    HeatMap(heat_data, radius=15, blur=10).add_to(heat_map)
+    print("Тепловая карта плотности")
+    display(heat_map)
+    marker_map.save("all_cafes_map.html")
+    heat_map.save("cafes_heatmap.html")
+    print("\nФайлы сохранены в окружении Colab. Скачивание...")
+    files.download("all_cafes_map.html")
+    files.download("cafes_heatmap.html")
+
+else:
+    print("Ни одной кофейни не найдено.")
+
+
+Теперь с помощью тепловой карты находим самые незанятые места, убираем непригодные и формируем топ-50, чем ближе к центру, тем лучше
+!pip install osmnx folium pandas geopandas shapely matplotlib
+
+import osmnx as ox
+import folium
+import pandas as pd
+import geopandas as gpd
+import numpy as np
+from shapely.geometry import Point, Polygon, box
+from folium.plugins import HeatMap
+from google.colab import files
+import warnings
+warnings.filterwarnings('ignore')
+
+moscow_gdf = ox.geocode_to_gdf("Москва, Россия", which_result=1) 
+moscow_polygon = moscow_gdf.geometry.iloc[0]
+print("Площадь: {:.1f} кв.км".format(moscow_polygon.area * 111**2))
+
+cafes = ox.features_from_polygon(
+    moscow_polygon,
+    tags={'amenity': 'cafe'})
+cafes = cafes[cafes.geometry.notna()]
+cafes['lon'] = cafes.geometry.centroid.x
+cafes['lat'] = cafes.geometry.centroid.y
+cafes_gdf = gpd.GeoDataFrame(
+    cafes[['name', 'geometry', 'lon', 'lat']],
+    geometry='geometry',
+    crs='EPSG:4326')
+print(f"Кофеен с координатами: {len(cafes_gdf)}")
+
+#Убираем места, которые нельзя использовать
+#Парки
+parks = ox.features_from_polygon(moscow_polygon, tags={'leisure': 'park'})
+#Лесопарки
+forests = ox.features_from_polygon(moscow_polygon, tags={'landuse': 'forest'})
+#Промзоны
+industrial = ox.features_from_polygon(moscow_polygon, tags={'landuse': 'industrial'})
+#Кладбища
+cemetery = ox.features_from_polygon(moscow_polygon, tags={'landuse': 'cemetery'})
+
+forbidden_list = [parks, forests, industrial, cemetery]
+forbidden = gpd.GeoDataFrame(pd.concat(forbidden_list, ignore_index=True))
+forbidden = forbidden[forbidden.geometry.notna()]
+print(f"Запрещенных зон: {len(forbidden)}")
+
+#Размер ячейки около 500 метров
+CELL_SIZE = 0.005  
+minx, miny, maxx, maxy = moscow_polygon.bounds
+xs = np.arange(minx, maxx, CELL_SIZE)
+ys = np.arange(miny, maxy, CELL_SIZE)
+cells = []
+for x in xs:
+    for y in ys:
+        cell = box(x, y, x+CELL_SIZE, y+CELL_SIZE)
+        if cell.intersects(moscow_polygon):
+            cells.append(cell)
+grid = gpd.GeoDataFrame(geometry=cells, crs='EPSG:4326')
+
+
+
+grid['cell_id'] = range(len(grid))
+joined = gpd.sjoin(cafes_gdf, grid, how='inner', predicate='intersects')
+cafe_counts = joined.groupby('cell_id').size().reset_index(name='cafe_count')
+grid = grid.merge(cafe_counts, on='cell_id', how='left')
+grid['cafe_count'] = grid['cafe_count'].fillna(0).astype(int)
+
+
+if len(forbidden) > 0:
+    forbidden_union = forbidden.geometry.unary_union
+    grid['forbidden'] = grid.geometry.apply(lambda cell: cell.intersects(forbidden_union))
+else:
+    grid['forbidden'] = False
+valid_grid = grid[~grid['forbidden']].copy()
+print(f"Ячейки после исключения: {len(valid_grid)}")
+
+
+kremlin = Point(37.6176, 55.7558)
+valid_grid['center_point'] = valid_grid.geometry.centroid
+valid_grid['distance_km'] = valid_grid.center_point.apply(lambda p: p.distance(kremlin) * 111  # 1° ≈ 111 км
+)
+
+max_cafes = valid_grid['cafe_count'].max()
+if max_cafes == 0:
+    max_cafes = 1
+valid_grid['density_score'] = 1 - (valid_grid['cafe_count'] / max_cafes)
+
+max_dist = valid_grid['distance_km'].max()
+if max_dist == 0:
+    max_dist = 1
+valid_grid['proximity_score'] = 1 - (valid_grid['distance_km'] / max_dist)
+
+#Близость к центру
+valid_grid['total_score'] = valid_grid['density_score'] + 1.5 * valid_grid['proximity_score']
+
+top50 = valid_grid.nlargest(50, 'total_score').copy()
+top50['lon'] = top50.center_point.apply(lambda p: p.x)
+top50['lat'] = top50.center_point.apply(lambda p: p.y)
+# Добавляем дополнительную информацию
+top50['recommendation'] = "Рекомендуемое место"
+
+#Топ-50
+center_moscow = [55.7558, 37.6176]
+recommend_map = folium.Map(location=center_moscow, zoom_start=11)
+
+if len(cafes_gdf) > 0:
+    heat_data = cafes_gdf[['lat', 'lon']].dropna().values.tolist()
+    HeatMap(heat_data, radius=15, blur=10, min_opacity=0.3, name='Плотность кофеен').add_to(recommend_map)
+
+for _, row in top50.iterrows():
+    folium.Marker(
+        location=[row['lat'], row['lon']],
+        popup=f"Рейтинг: {row['total_score']:.2f}<br>Кофеен в ячейке: {row['cafe_count']}<br>Расст. до Кремля: {row['distance_km']:.1f} км",
+        icon=folium.Icon(color='green', icon='star', prefix='fa')).add_to(recommend_map)
+
+for _, row in top50.iterrows():
+    folium.GeoJson(
+        row.geometry,
+        style_function=lambda x: {'fillColor': 'green', 'color': 'green', 'weight': 1, 'fillOpacity': 0.15}).add_to(recommend_map)
+
+from IPython.display import display
+display(recommend_map)
+
+
+# Скачивание файлов
+# files.download('top50_recommended_zones.html')
+
 
