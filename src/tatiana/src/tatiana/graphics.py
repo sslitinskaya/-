@@ -23,7 +23,7 @@ class CompetitorAnalyzer:
         self.df.rename(columns={'Количество отзывов': 'reviews_count'}, inplace=True)
         
     def basic_stats(self):
-        print("=== Базовые метрики ===")
+        print("Базовые метрики пупупу")
         print(f"Всего кофеен: {len(self.df)}")
         print(f"Средний рейтинг: {self.df['Рейтинг'].mean():.2f} (±{self.df['Рейтинг'].std():.2f})")
         print(f"Медианный рейтинг: {self.df['Рейтинг'].median():.2f}")
@@ -50,9 +50,9 @@ class CompetitorAnalyzer:
         stat, p = stats.ttest_ind(group_no, group_yes, nan_policy='omit')
         print(f"T-test p-value: {p:.4f}")
         if p < 0.05:
-            print("→ Разница статистически значима: кофейни с сайтом имеют более высокий рейтинг.")
+            print("Разница статистически значима: кофейни с сайтом имеют более высокий рейтинг.")
         else:
-            print("→ Разница не значима.")
+            print("Разница не значима.")
             
     def plot_rating_vs_reviews(self):
         plt.figure(figsize=(10,6))
@@ -73,7 +73,7 @@ class CompetitorAnalyzer:
         plt.xticks(rotation=45)
         plt.ylabel('Количество кофеен')
         plt.show()
-        print("Самые насыщенные районы:")
+        print("Посмотрим на самые насыщенные районы:")
         print(top)
         
     def map_coffee_shops(self):
