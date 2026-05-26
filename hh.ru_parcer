@@ -1,0 +1,93 @@
+import re
+import time
+import requests
+import pandas as pd
+import matplotlib.pyplot as plt
+from bs4 import BeautifulSoup
+from urllib.parse import urlencode
+from tqdm import tqdm
+
+BASE_URL = "https://hh.ru/search/vacancy"
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+AREA, PAGES = 1, 10
+QUERIES = {
+    "бариста": "бариста кофейня",
+    "уборщик": "уборщик кафе", 
+    "официант": "официант кафе",
+    "повар": "повар кафе"
+}
+KEYWORDS = {
+    "бариста": ["бариста"],
+    "уборщик": ["уборщик", "уборщица", "мойщик", "мойщица"],
+    "официант": ["официант", "официантка"],
+    "повар": ["повар"]
+}
+def clean_text(text):
+    return re.sub(r"\s+", " ", str(text).replace("\xa0", " ").replace("\u202f", " ")).strip()
+def parse_salary(text):
+    pattern = re.compile(r"(?:(?:от|до)\s*)?\d[\d\s]{1,9}(?:\s*[–—-]\s*\d[\d\s]{1,9})?\s*₽", re.IGNORECASE)
+    for salary_text in pattern.findall(text):
+        salary_text = clean_text(salary_text)
+        low = salary_text.lower()
+        if "за час" in low or "за смену" in low or low.startswith("до "):
+            continue
+        numbers = [int(x.replace(" ", "")) for x in re.findall(r"\d[\d\s]*", salary_text.split("₽")[0])]
+        if not numbers:
+            continue 
+        salary = numbers[0]
+        if "на руки" in low:
+            salary = salary / 0.87
+        return {"salary_text": salary_text, "salary_net": round(salary)}
+    return None
+def find_card(link):
+    current = link
+    for _ in range(10):
+        if not current:
+            return None
+        if "₽" in clean_text(current.get_text(" ")) and len(current.select('a[href*="/vacancy/"]')) <= 3:
+            return current
+        current = current.parent
+    return None
+rows = []
+for position, query in tqdm(QUERIES.items()):
+    for page in range(PAGES):
+        url = BASE_URL + "?" + urlencode({"text": query, "area": AREA, "only_with_salary": "true", "search_field": "name", "page": page})
+        response = requests.get(url, headers=HEADERS)
+        print(url, response.status_code)
+        if response.status_code != 200:
+            continue
+        soup = BeautifulSoup(response.text, "lxml")
+        seen_urls = set()
+        for link in soup.select('a[href*="/vacancy/"]'):
+            title = clean_text(link.get_text(" "))
+            if not title or not any(word in title.lower() for word in KEYWORDS[position]):
+                continue
+            href = "https://hh.ru" + link.get("href", "").split("?")[0] if link.get("href", "").startswith("/") else link.get("href", "").split("?")[0]
+            if href in seen_urls:
+                continue
+            seen_urls.add(href)
+            card = find_card(link)
+            if not card:
+                continue 
+            salary_data = parse_salary(clean_text(card.get_text(" ")))
+            if salary_data:
+                rows.append({**salary_data, "position": position, "title": title, "url": href})
+        time.sleep(1.5)
+df = pd.DataFrame(rows)
+df_clean = df.drop_duplicates(subset=["position", "title", "salary_text"]).query("salary_net >= 30000")
+salary_summary = df_clean.groupby("position").agg(vacancies_count=("salary_net", "count"), median_salary_net=("salary_net", "median"), avg_salary_net=("salary_net", "mean"), min_salary_net=("salary_net", "min"), max_salary_net=("salary_net", "max")).round(0).reset_index().sort_values("median_salary_net", ascending=False)
+plot_data = salary_summary.sort_values("median_salary_net")
+plt.figure(figsize=(12, 8))
+x, width = range(len(plot_data["position"])), 0.2
+metrics = [(plot_data["median_salary_net"], "Медианная", "blue", -1.5), (plot_data["avg_salary_net"], "Средняя", "green", -0.5), (plot_data["max_salary_net"], "Максимальная", "red", 0.5), (plot_data["min_salary_net"], "Минимальная", "orange", 1.5)]
+for data, label, color, offset in metrics:
+    plt.bar([i + offset*width for i in x], data, width=width, label=label, color=color)
+plt.xticks(x, plot_data["position"])
+plt.title("Зарплаты в Москве (вместе с налогами)")
+plt.xlabel("Вакансия")
+plt.ylabel("Рублей в месяц")
+plt.legend()
+plt.grid(axis="y", alpha=0.3)
+plt.tight_layout()
+plt.savefig("all_salaries_hh_moscow.png", dpi=200)
+plt.show()
